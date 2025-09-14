@@ -1,0 +1,224 @@
+-- Delta-optimised AutoMacro (Roblox executor Lua)
+-- Uses VirtualInputManager (preferred) and falls back to VirtualUser
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+local Running, Paused = false, false
+
+-- Percent coords
+local ButtonXPerc, ButtonYPerc = 0.44, 0.64
+local FixedXPerc,  FixedYPerc  = 0.51, 0.50
+local PostEXPerc,  PostEYPerc  = 0.56, 0.48
+
+-- Detect services
+local ok, VIM = pcall(function() return game:GetService("VirtualInputManager") end)
+if not ok then VIM = nil end
+local ok2, VUser = pcall(function() return game:GetService("VirtualUser") end)
+if not ok2 then VUser = nil end
+
+print("Detected VIM:", VIM ~= nil, "Detected VirtualUser:", VUser ~= nil)
+
+-- viewport helper
+local function getViewport()
+    return (Camera and Camera.ViewportSize) or Vector2.new(800,600)
+end
+local function toScreen(xPerc, yPerc)
+    local vp = getViewport()
+    return Vector2.new(vp.X * xPerc, vp.Y * yPerc)
+end
+
+-- Precise VIM call wrappers (documented signatures)
+local function vimSendMouseButton(x,y,mouseButton,isDown)
+    -- SendMouseButtonEvent(int x,int y,int mouseButton,bool isDown, Instance pluginInstance)
+    if not VIM then return false end
+    local suc, err = pcall(function()
+        VIM:SendMouseButtonEvent(math.floor(x), math.floor(y), mouseButton, isDown, game)
+    end)
+    return suc
+end
+
+local function vimSendMouseMove(x,y)
+    if not VIM then return false end
+    local suc, err = pcall(function()
+        VIM:SendMouseMoveEvent(x, y, game)
+    end)
+    return suc
+end
+
+local function vimSendKey(isDown, keyEnum)
+    if not VIM then return false end
+    -- SendKeyEvent(bool isPressed, KeyCode keyCode, bool isRepeat, Instance pluginGui)
+    local suc, err = pcall(function()
+        VIM:SendKeyEvent(isDown, keyEnum, false, game)
+    end)
+    return suc
+end
+
+-- VirtualUser wrappers (fallback)
+local function vuClick1(pos)
+    if not VUser then return false end
+    local suc = pcall(function()
+        -- Button1Down/Up take (position, cameraCFrame) on many executors
+        VUser:Button1Down(Vector2.new(pos.X, pos.Y), Camera.CFrame)
+        task.wait(0.03)
+        VUser:Button1Up(Vector2.new(pos.X, pos.Y), Camera.CFrame)
+    end)
+    return suc
+end
+
+-- unified clickAt (left=0, right=1)
+local function clickAt(vec2, button)
+    button = button or 0
+    -- Try VIM first (documented)
+    if VIM and vimSendMouseButton(vec2.X, vec2.Y, button, true) then
+        task.wait(0.03)
+        vimSendMouseButton(vec2.X, vec2.Y, button, false)
+        return true
+    end
+    -- Try VUser fallback (left button)
+    if VUser and button == 0 and vuClick1(vec2) then
+        return true
+    end
+    -- Last fallback: attempt Camera-based Button1Down/Up on VUser-less environments (rare)
+    pcall(function()
+        local mouse = LocalPlayer:GetMouse()
+        mouse.X = vec2.X; mouse.Y = vec2.Y
+        if button == 0 then mouse:Click() end
+    end)
+    return false
+end
+
+-- pressKey uses VIM SendKeyEvent with Enum.KeyCode
+local function pressKeyRoblox(keyEnum, holdFor)
+    holdFor = holdFor or 0.05
+    if VIM then
+        if vimSendKey(true, keyEnum) then
+            task.wait(holdFor)
+            vimSendKey(false, keyEnum)
+            return true
+        end
+    end
+    -- Fallback: try to fire Input events (client-only)
+    pcall(function()
+        UserInputService.InputBegan:Fire({UserInputType = Enum.UserInputType.Keyboard, KeyCode = keyEnum}, false)
+        task.wait(holdFor)
+        UserInputService.InputEnded:Fire({UserInputType = Enum.UserInputType.Keyboard, KeyCode = keyEnum}, false)
+    end)
+    return false
+end
+
+-- spam key (seconds)
+local function spamKeyEnum(keyEnum, seconds)
+    local start = tick()
+    while Running and not Paused and (tick() - start < seconds) do
+        pressKeyRoblox(keyEnum, 0.01)
+        task.wait(0.02)
+    end
+end
+
+-- right-drag: use VIM SendMouseButton + SendMouseMoveEvent
+local function rightDragAt(vec2, deltaY)
+    if VIM then
+        if vimSendMouseButton(vec2.X, vec2.Y, 1, true) then
+            task.wait(0.02)
+            vimSendMouseMove(vec2.X, vec2.Y + deltaY)
+            task.wait(0.02)
+            vimSendMouseButton(vec2.X, vec2.Y + deltaY, 1, false)
+            return true
+        end
+    end
+    -- fallback: click at start and end
+    clickAt(vec2, 1)
+    task.wait(0.02)
+    clickAt(Vector2.new(vec2.X, vec2.Y + deltaY), 1)
+    return false
+end
+
+-- GUI (simple)
+local screen = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
+screen.ResetOnSpawn = false
+local frame = Instance.new("Frame", screen)
+frame.Size = UDim2.new(0,300,0,120); frame.Position = UDim2.new(0,10,0,10)
+frame.BackgroundTransparency = 0.25; frame.BackgroundColor3 = Color3.fromRGB(30,30,30)
+
+local function mkBtn(txt, x)
+    local b = Instance.new("TextButton", frame)
+    b.Size = UDim2.new(0,80,0,30); b.Position = UDim2.new(0,x,0,40)
+    b.Text = txt; b.BackgroundColor3 = Color3.fromRGB(60,60,60); b.TextColor3 = Color3.new(1,1,1)
+    return b
+end
+local startBtn = mkBtn("Start", 0.03)
+local pauseBtn = mkBtn("Pause", 0.35)
+local stopBtn  = mkBtn("Stop", 0.67)
+
+local status = Instance.new("TextLabel", frame)
+status.Size = UDim2.new(0,280,0,22); status.Position = UDim2.new(0,10,0,10)
+status.BackgroundTransparency = 1; status.TextColor3 = Color3.new(1,1,1); status.Text = "Status: Stopped"
+
+-- core loop function
+local function mainLoop()
+    while Running do
+        if Paused then task.wait(0.1) else status.Text = "Status: Running" end
+        if Paused then continue end
+
+        task.wait(5) -- 5-second wait
+        -- 1) click button
+        clickAt(toScreen(ButtonXPerc, ButtonYPerc), 0)
+        task.wait(0.2)
+
+        -- 2) click center
+        local vp = getViewport(); clickAt(Vector2.new(vp.X/2, vp.Y/2), 0)
+
+        -- 3) wait 10
+        task.wait(10)
+
+        -- 4) right-drag down 200 px
+        rightDragAt(Vector2.new(vp.X/2, vp.Y/2), 200)
+        task.wait(0.1)
+
+        task.wait(3)
+        -- 5) press 1 (KeyCode.One)
+        pressKeyRoblox(Enum.KeyCode.One, 0.05)
+
+        -- 6) click fixed coords
+        clickAt(toScreen(FixedXPerc, FixedYPerc), 0)
+        task.wait(0.05)
+
+        -- 7) spam E for 60s
+        spamKeyEnum(Enum.KeyCode.E, 60)
+
+        if Running and not Paused then
+            pressKeyRoblox(Enum.KeyCode.Q, 0.05)
+            pressKeyRoblox(Enum.KeyCode.One, 0.05)
+            clickAt(toScreen(PostEXPerc, PostEYPerc), 0)
+        end
+
+        -- second E spam 45s
+        spamKeyEnum(Enum.KeyCode.E, 45)
+    end
+    status.Text = "Status: Stopped"
+end
+
+-- GUI callbacks
+startBtn.MouseButton1Click:Connect(function()
+    if Running then return end
+    Running, Paused = true, false
+    status.Text = "Status: Running"
+    task.spawn(mainLoop)
+end)
+pauseBtn.MouseButton1Click:Connect(function()
+    if Running then Paused = not Paused; status.Text = Paused and "Status: Paused" or "Status: Running" end
+end)
+stopBtn.MouseButton1Click:Connect(function()
+    Running, Paused = false, false; status.Text = "Status: Stopped"
+end)
+
+UserInputService.InputBegan:Connect(function(inp, gp)
+    if gp then return end
+    if inp.KeyCode == Enum.KeyCode.Zero then Running, Paused = false, false; status.Text = "Status: Stopped" end
+end)
+
+print("AutoMacro (Delta-optimised) loaded. VIM:", VIM~=nil, "VUser:", VUser~=nil)
