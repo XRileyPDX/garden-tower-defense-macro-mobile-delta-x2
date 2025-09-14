@@ -1,6 +1,6 @@
--- Polished Delta executor AutoMacro
+-- Fully improved Delta executor AutoMacro
+
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -8,202 +8,171 @@ local Camera = workspace.CurrentCamera
 -- Global state
 local Running, Paused = false, false
 
--- Percent coordinates
+-- Percent coordinates (relative to viewport)
 local ButtonXPerc, ButtonYPerc = 0.44, 0.64
-local FixedXPerc,  FixedYPerc  = 0.51, 0.50
-local PostEXPerc,  PostEYPerc  = 0.56, 0.48
+local FixedXPerc, FixedYPerc = 0.51, 0.50
+local PostEXPerc, PostEYPerc = 0.56, 0.48
 
--- Detect Delta services
+-- Detect VirtualInputManager (VIM)
 local ok, VIM = pcall(function() return game:GetService("VirtualInputManager") end)
-if not ok then VIM = nil end
-local ok2, VUser = pcall(function() return game:GetService("VirtualUser") end)
-if not ok2 then VUser = nil end
-print("Detected VIM:", VIM~=nil, "Detected VirtualUser:", VUser~=nil)
-
--- Viewport helper
-local function getViewport()
-    return (Camera and Camera.ViewportSize) or Vector2.new(800,600)
+if not ok or not VIM then
+    warn("VirtualInputManager not detected. Script will not work properly.")
+    return
 end
 
+print("VIM detected, script ready.")
+
+-- Converts percentage to absolute screen coordinates
 local function toScreen(xPerc, yPerc)
-    local vp = getViewport()
-    return Vector2.new(vp.X * xPerc, vp.Y * yPerc)
+    local vp = Camera.ViewportSize
+    return vp.X * xPerc, vp.Y * yPerc
 end
 
--- Mouse click helpers
-local function vimSendMouseButton(x,y,mouseButton,isDown)
-    if not VIM then return false end
-    return pcall(function()
-        VIM:SendMouseButtonEvent(math.floor(x), math.floor(y), mouseButton, isDown, game)
-    end)
-end
-
-local function vuClick1(pos)
-    if not VUser then return false end
-    return pcall(function()
-        VUser:Button1Down(pos, Camera.CFrame)
-        task.wait(0.03)
-        VUser:Button1Up(pos, Camera.CFrame)
-    end)
-end
-
-local function clickAt(vec2, button)
+-- Click helper using VIM (absolute screen coordinates)
+local function clickAt(x, y, button)
     button = button or 0
-    if VIM and vimSendMouseButton(vec2.X, vec2.Y, button, true) then
-        task.wait(0.03)
-        vimSendMouseButton(vec2.X, vec2.Y, button, false)
-        return true
-    elseif VUser and button == 0 and vuClick1(vec2) then
-        return true
-    end
-    -- last resort: local mouse
-    pcall(function()
-        local mouse = LocalPlayer:GetMouse()
-        mouse.X = vec2.X; mouse.Y = vec2.Y
-        if button == 0 then mouse:Click() end
-    end)
-    return false
-end
-
--- Key press helper
-local function pressKeyRoblox(keyEnum, holdFor)
-    holdFor = holdFor or 0.05
-    if VIM then
-        if pcall(function() VIM:SendKeyEvent(true, keyEnum, false, game) end) then
-            task.wait(holdFor)
-            pcall(function() VIM:SendKeyEvent(false, keyEnum, false, game) end)
-            return true
-        end
-    end
-    pcall(function()
-        UserInputService.InputBegan:Fire({UserInputType=Enum.UserInputType.Keyboard, KeyCode=keyEnum}, false)
-        task.wait(holdFor)
-        UserInputService.InputEnded:Fire({UserInputType=Enum.UserInputType.Keyboard, KeyCode=keyEnum}, false)
-    end)
-    return false
-end
-
--- Spam key
-local function spamKeyEnum(keyEnum, seconds)
-    local start = tick()
-    while Running and not Paused and (tick() - start < seconds) do
-        pressKeyRoblox(keyEnum, 0.01)
-        task.wait(0.02)
-    end
+    VIM:SendMouseButtonEvent(x, y, button, true, game)
+    task.wait(0.03)
+    VIM:SendMouseButtonEvent(x, y, button, false, game)
 end
 
 -- Right-drag helper
-local function rightDragAt(vec2, deltaY)
-    if VIM then
-        if pcall(function()
-            VIM:SendMouseButtonEvent(vec2.X, vec2.Y, 1, true, game)
-            task.wait(0.02)
-            VIM:SendMouseMoveEvent(vec2.X, vec2.Y + deltaY, game)
-            task.wait(0.02)
-            VIM:SendMouseButtonEvent(vec2.X, vec2.Y + deltaY, 1, false, game)
-        end) then return true end
-    end
-    clickAt(vec2, 1)
+local function rightDrag(x, y, deltaY)
+    VIM:SendMouseButtonEvent(x, y, 1, true, game) -- right down
     task.wait(0.02)
-    clickAt(Vector2.new(vec2.X, vec2.Y + deltaY), 1)
-    return false
+    VIM:SendMouseMoveEvent(x, y + deltaY, game)
+    task.wait(0.02)
+    VIM:SendMouseButtonEvent(x, y + deltaY, 1, false, game) -- right up
 end
 
--- GUI
-local screen = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
-screen.ResetOnSpawn = false
-local frame = Instance.new("Frame", screen)
-frame.Size = UDim2.new(0,320,0,140)
-frame.Position = UDim2.new(0,10,0,10)
-frame.BackgroundTransparency = 0.25
-frame.BackgroundColor3 = Color3.fromRGB(25,25,25)
-frame.BorderSizePixel = 0
-
-local function mkBtn(txt, x)
-    local b = Instance.new("TextButton", frame)
-    b.Size = UDim2.new(0,90,0,35)
-    b.Position = UDim2.new(0,x,0,60)
-    b.Text = txt
-    b.BackgroundColor3 = Color3.fromRGB(60,60,60)
-    b.TextColor3 = Color3.fromRGB(255,255,255)
-    b.Font = Enum.Font.SourceSansBold
-    b.TextSize = 18
-    return b
+-- Press key helper
+local function pressKey(keyEnum, holdTime)
+    holdTime = holdTime or 0.05
+    VIM:SendKeyEvent(true, keyEnum, false, game)
+    task.wait(holdTime)
+    VIM:SendKeyEvent(false, keyEnum, false, game)
 end
 
-local startBtn = mkBtn("Start", 0.03)
-local pauseBtn = mkBtn("Pause", 0.37)
-local stopBtn  = mkBtn("Stop", 0.70)
-
-local status = Instance.new("TextLabel", frame)
-status.Size = UDim2.new(0,300,0,30)
-status.Position = UDim2.new(0,10,0,10)
-status.BackgroundTransparency = 1
-status.TextColor3 = Color3.fromRGB(255,255,255)
-status.Text = "Status: Stopped"
-status.Font = Enum.Font.SourceSansBold
-status.TextSize = 20
-status.TextXAlignment = Enum.TextXAlignment.Left
+-- Spam key helper
+local function spamKey(keyEnum, duration)
+    local start = tick()
+    while Running and not Paused and tick() - start < duration do
+        pressKey(keyEnum, 0.01)
+        task.wait(0.02)
+    end
+end
 
 -- Main loop
 local function mainLoop()
     while Running do
         if Paused then
-            status.Text = "Status: Paused"
             task.wait(0.1)
             continue
         end
-        status.Text = "Status: Running"
-        task.wait(5) -- wait 5s
 
-        clickAt(toScreen(ButtonXPerc, ButtonYPerc),0)
-        task.wait(0.2)
+        task.wait(5) -- initial wait
 
-        local vp = getViewport()
-        clickAt(Vector2.new(vp.X/2, vp.Y/2),0)
+        -- 1️⃣ Click button
+        local bx, by = toScreen(ButtonXPerc, ButtonYPerc)
+        clickAt(bx, by)
+
+        -- 2️⃣ Click center of screen
+        local cx, cy = toScreen(0.5, 0.5)
+        clickAt(cx, cy)
 
         task.wait(10)
 
-        rightDragAt(Vector2.new(vp.X/2, vp.Y/2),200)
-        task.wait(0.1)
+        -- 3️⃣ Right-click drag down
+        rightDrag(cx, cy, 200)
         task.wait(3)
 
-        pressKeyRoblox(Enum.KeyCode.One,0.05)
-        clickAt(toScreen(FixedXPerc, FixedYPerc),0)
-        task.wait(0.05)
+        -- 4️⃣ Press 1
+        pressKey(Enum.KeyCode.One, 0.05)
 
-        spamKeyEnum(Enum.KeyCode.E,60)
+        -- 5️⃣ Click fixed position
+        local fx, fy = toScreen(FixedXPerc, FixedYPerc)
+        clickAt(fx, fy)
 
+        -- 6️⃣ First E spam for 60 seconds
+        spamKey(Enum.KeyCode.E, 60)
+
+        -- Post-E actions
         if Running and not Paused then
-            pressKeyRoblox(Enum.KeyCode.Q,0.05)
-            pressKeyRoblox(Enum.KeyCode.One,0.05)
-            clickAt(toScreen(PostEXPerc, PostEYPerc),0)
+            pressKey(Enum.KeyCode.Q, 0.05)
+            pressKey(Enum.KeyCode.One, 0.05)
+            local px, py = toScreen(PostEXPerc, PostEYPerc)
+            clickAt(px, py)
         end
 
-        spamKeyEnum(Enum.KeyCode.E,45)
+        -- Second E spam for 45 seconds
+        spamKey(Enum.KeyCode.E, 45)
     end
-    status.Text = "Status: Stopped"
 end
+
+-- GUI
+local screen = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
+screen.ResetOnSpawn = false
+
+local frame = Instance.new("Frame", screen)
+frame.Size = UDim2.new(0, 320, 0, 140)
+frame.Position = UDim2.new(0, 10, 0, 10)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+frame.BackgroundTransparency = 0.25
+frame.BorderSizePixel = 0
+
+local function makeButton(text, x)
+    local b = Instance.new("TextButton", frame)
+    b.Size = UDim2.new(0, 90, 0, 35)
+    b.Position = UDim2.new(0, x, 0, 60)
+    b.Text = text
+    b.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    b.TextColor3 = Color3.fromRGB(255, 255, 255)
+    b.Font = Enum.Font.SourceSansBold
+    b.TextSize = 18
+    return b
+end
+
+local startBtn = makeButton("Start", 0.03)
+local pauseBtn = makeButton("Pause", 0.37)
+local stopBtn  = makeButton("Stop", 0.70)
+
+local status = Instance.new("TextLabel", frame)
+status.Size = UDim2.new(0, 300, 0, 30)
+status.Position = UDim2.new(0, 10, 0, 10)
+status.BackgroundTransparency = 1
+status.TextColor3 = Color3.fromRGB(255, 255, 255)
+status.Text = "Status: Stopped"
+status.Font = Enum.Font.SourceSansBold
+status.TextSize = 20
+status.TextXAlignment = Enum.TextXAlignment.Left
 
 -- GUI callbacks
 startBtn.MouseButton1Click:Connect(function()
     if Running then return end
     Running, Paused = true, false
+    status.Text = "Status: Running"
     task.spawn(mainLoop)
 end)
-pauseBtn.MouseButton1Click:Connect(function()
-    if Running then Paused = not Paused end
-end)
-stopBtn.MouseButton1Click:Connect(function()
-    Running, Paused = false, false
-end)
 
--- Emergency stop
-UserInputService.InputBegan:Connect(function(inp,gp)
-    if gp then return end
-    if inp.KeyCode == Enum.KeyCode.Zero then
-        Running, Paused = false, false
+pauseBtn.MouseButton1Click:Connect(function()
+    if Running then
+        Paused = not Paused
+        status.Text = Paused and "Status: Paused" or "Status: Running"
     end
 end)
 
-print("Polished AutoMacro loaded: Start / Pause / Stop ready.")
+stopBtn.MouseButton1Click:Connect(function()
+    Running, Paused = false, false
+    status.Text = "Status: Stopped"
+end)
+
+-- Emergency stop (press 0)
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.Zero then
+        Running, Paused = false, false
+        status.Text = "Status: Stopped"
+    end
+end)
+
+print("Fully improved AutoMacro loaded. Start / Pause / Stop ready.")
